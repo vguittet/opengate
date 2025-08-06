@@ -120,8 +120,7 @@ particle_names_Gate_to_G4 = {
     "gamma": "gamma",
     "electron": "e-",
     "positron": "e+",
-    "proton": "proton",
-    "neutron": "neutron",
+    "proton": "proton"
 }
 
 actor_types = {
