@@ -22,7 +22,10 @@ from .actoroutput import (
     ActorOutputQuotientMeanImage,
     ActorOutputSingleImageWithVariance,
     UserInterfaceToActorOutputImage,
+    ActorOutputRoot,
+    ActorOutputImage,
 )
+import itk
 
 
 class VoxelDepositActor(ActorBase):
@@ -172,7 +175,10 @@ class VoxelDepositActor(ActorBase):
         origin = -size * spacing / 2.0 + spacing / 2.0
 
         translation = np.array(self.translation)
-        origin_local = Rotation.from_matrix(self.rotation).apply(origin) + translation
+        # the slicing "[:3]" is required for 4D images (3D image of histograms)
+        origin_local = (
+            Rotation.from_matrix(self.rotation).apply(origin[:3]) + translation[:3]
+        )
 
         # image centered at (0,0,0), no rotation
         if self.output_coordinate_system is None:
@@ -184,6 +190,9 @@ class VoxelDepositActor(ActorBase):
         # image centered at self.translation and rotated by self.rotation,
         # i.e. in the reference frame of the volume to which the actor is attached.
         elif self.output_coordinate_system in ("local",):
+            if size.shape != origin_local.shape:
+                # special case for 4D images
+                origin_local = np.append(origin_local, [0])
             self.user_output[which_output].set_image_properties(
                 run_index, origin=origin_local.tolist(), rotation=self.rotation
             )
@@ -705,55 +714,6 @@ class DoseActor(VoxelDepositActor, g4.GateDoseActor):
         VoxelDepositActor.EndSimulationAction(self)
 
 
-class TLEDoseActor(DoseActor, g4.GateTLEDoseActor):
-    """TLE = Track Length Estimator"""
-
-    energy_min: float
-    energy_max: float
-    database: str
-
-    user_info_defaults = {
-        "energy_min": (
-            0.0,
-            {"doc": "Kill the gamma if below this energy"},
-        ),
-        "energy_max": (
-            1.0 * g4_units.MeV,
-            {
-                "doc": "Above this energy, do not perform TLE (TLE is only relevant for low energy gamma)"
-            },
-        ),
-        "database": (
-            "EPDL",
-            {
-                "doc": "which database to use",
-                "allowed_values": ("EPDL", "NIST"),  # "simulated" does not work
-            },
-        ),
-    }
-
-    def __initcpp__(self):
-        g4.GateTLEDoseActor.__init__(self, self.user_info)
-        self.AddActions(
-            {
-                "BeginOfRunActionMasterThread",
-                "EndOfRunActionMasterThread",
-                "BeginOfRunAction",
-                "EndOfRunAction",
-                "BeginOfEventAction",
-                "SteppingAction",
-                "PreUserTrackingAction",
-            }
-        )
-
-    def initialize(self, *args):
-        if self.score_in != "material":
-            fatal(
-                f"TLEDoseActor cannot score in {self.score_in}, only 'material' is allowed."
-            )
-        super().initialize(args)
-
-
 def _setter_hook_score_in_let_actor(self, value):
     if value.lower() in ("g4_water", "g4water"):
         """Assuming a misspelling of G4_WATER and correcting it to correct spelling; Note that this is rather dangerous operation."""
@@ -959,34 +919,28 @@ class ProductionAndStoppingActor(VoxelDepositActor, g4.GateProductionAndStopping
 
 
 class FluenceActor(VoxelDepositActor, g4.GateFluenceActor):
-    """
-    FluenceActor: compute a 3D map of fluence
-    FIXME: add scatter order and uncertainty
-    """
-
-    # hints for IDE
-    uncertainty: bool
-    scatter: bool
 
     user_info_defaults = {
-        "uncertainty": (
-            False,
+        "timebins": (
+            None,
             {
-                "doc": "FIXME",
+                "doc": "Number of time bins",
             },
         ),
-        "scatter": (
-            False,
+        "energybins": (
+            None,
             {
-                "doc": "FIXME",
+                "doc": "Number of energy bins",
             },
         ),
+        "output_name": (None, {"doc": "output_name"}),
     }
 
     user_output_config = {
-        "fluence": {
+        "emission": {
             "actor_output_class": ActorOutputSingleImage,
-        },
+            "active": True,
+        }
     }
 
     def __init__(self, *args, **kwargs):
@@ -998,36 +952,33 @@ class FluenceActor(VoxelDepositActor, g4.GateFluenceActor):
         self.AddActions(
             {
                 "BeginOfRunActionMasterThread",
-                "EndOfRunActionMasterThread",
                 "BeginOfEventAction",
+                "EndOfRunAction",
+                "SteppingAction",
+                "EndOfRunActionMasterThread",
             }
         )
 
     def initialize(self):
         VoxelDepositActor.initialize(self)
-
         self.check_user_input()
-
-        # no options yet
-        if self.uncertainty or self.scatter:
-            fatal("FluenceActor : uncertainty and scatter not implemented yet")
-
+        self.user_output.emission.set_active(True)
+        # C++ side
         self.InitializeUserInfo(self.user_info)
-        # Set the physical volume name on the C++ side
-        self.SetPhysicalVolumeName(self.get_physical_volume_name())
         self.InitializeCpp()
+        self.SetPhysicalVolumeName(self.user_info.get("attached_to"))
 
     def BeginOfRunActionMasterThread(self, run_index):
-        self.prepare_output_for_run("fluence", run_index)
-        self.push_to_cpp_image("fluence", run_index, self.cpp_fluence_image)
         g4.GateFluenceActor.BeginOfRunActionMasterThread(self, run_index)
 
     def EndOfRunActionMasterThread(self, run_index):
-        self.fetch_from_cpp_image("fluence", run_index, self.cpp_fluence_image)
-        self._update_output_coordinate_system("fluence", run_index)
-        self.user_output.fluence.store_meta_data(
-            run_index, number_of_samples=self.NbOfEvent
-        )
+
+        # Save the image using ITK
+        filename = g4.GateFluenceActor.GetOutputImage(self)
+        itk_image = itk.imread(filename)
+        itk.imwrite(itk_image, self.user_info["output_name"])
+        self.user_output.emission.store_data(run_index, itk_image)
+
         VoxelDepositActor.EndOfRunActionMasterThread(self, run_index)
         return 0
 
@@ -1038,7 +989,6 @@ class FluenceActor(VoxelDepositActor, g4.GateFluenceActor):
 
 process_cls(VoxelDepositActor)
 process_cls(DoseActor)
-process_cls(TLEDoseActor)
 process_cls(LETActor)
 process_cls(FluenceActor)
 process_cls(ProductionAndStoppingActor)

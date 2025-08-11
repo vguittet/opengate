@@ -11,6 +11,7 @@ from ..image import (
     multiply_itk_images,
     scale_itk_image,
     create_3d_image,
+    create_3d_image_of_histogram,
     write_itk_image,
     get_info_from_image,
 )
@@ -289,7 +290,17 @@ class ItkImageDataItem(DataItem):
             if "origin" in properties and properties["origin"] is not None:
                 self.data.SetOrigin(properties["origin"])
             if "rotation" in properties and properties["rotation"] is not None:
-                self.data.SetDirection(properties["rotation"])
+                r = properties["rotation"]
+                if self.data.GetImageDimension() == 4:
+                    # for 4D image, the rotation is enhanced
+                    r = np.pad(
+                        r,
+                        pad_width=((0, 1), (0, 1)),
+                        mode="constant",
+                        constant_values=0,
+                    )
+                    r[3][3] = 1.0
+                self.data.SetDirection(r)
 
     def get_image_properties(self):
         return get_info_from_image(self.data)
@@ -308,6 +319,22 @@ class ItkImageDataItem(DataItem):
     ):
         self.set_data(
             create_3d_image(size, spacing, origin, pixel_type, allocate, fill_value)
+        )
+
+    def create_image_of_histograms(
+        self,
+        size,
+        spacing,
+        bins,
+        origin=None,
+        pixel_type="float",
+        allocate=True,
+        fill_value=0,
+    ):
+        self.set_data(
+            create_3d_image_of_histogram(
+                size, spacing, bins, origin, pixel_type, allocate, fill_value
+            )
         )
 
     def write(self, path):
@@ -615,7 +642,7 @@ class SingleItkImage(DataItemContainer):
 
     @property
     def image(self):
-        return self.data[0].image
+        return self.data
 
 
 class SingleMeanItkImage(DataItemContainer):
